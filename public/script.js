@@ -2735,6 +2735,12 @@ export function addOneMessage(mes, { type = 'normal', insertAfter = null, scroll
         newMessage.find('.mes_lock').hide();
         newMessage.find('.mes_unlock').show();
         newMessage.find('.mes_edit').addClass('disabled').attr('disabled', 'disabled');
+
+        // Show combine button if previous message is from the same character
+        const mesId = newMessage.attr('mesid');
+        if (mesId > 0 && chat[mesId - 1] && chat[mesId - 1].name === mes.name && !chat[mesId - 1].is_user) {
+            newMessage.find('.mes_combine').show();
+        }
     }
 
     if (showSwipes) {
@@ -11944,6 +11950,11 @@ jQuery(async function () {
         mesBlock.find('.mes_unlock').show();
         mesBlock.find('.mes_edit').addClass('disabled').attr('disabled', 'disabled');
 
+        // Show combine button if previous message is from the same character
+        if (mesId > 0 && chat[mesId - 1] && chat[mesId - 1].name === chat[mesId].name && !chat[mesId - 1].is_user) {
+            mesBlock.find('.mes_combine').show();
+        }
+
         await saveChatConditional();
     });
 
@@ -11963,8 +11974,57 @@ jQuery(async function () {
         $(this).hide();
         mesBlock.find('.mes_lock').show();
         mesBlock.find('.mes_edit').removeClass('disabled').removeAttr('disabled');
+        mesBlock.find('.mes_combine').hide();
 
         await saveChatConditional();
+    });
+
+    // Combine locked message with previous message handler
+    $(document).on('click', '.mes_combine', async function () {
+        const mesBlock = $(this).closest('.mes');
+        const mesId = parseInt(mesBlock.attr('mesid'));
+
+        if (!chat[mesId] || mesId === 0) return;
+
+        const currentMessage = chat[mesId];
+        const previousMessage = chat[mesId - 1];
+
+        // Check if previous message is from the same character
+        if (!previousMessage || previousMessage.name !== currentMessage.name || previousMessage.is_user) {
+            return;
+        }
+
+        // Clean EOT tokens from the previous message
+        let cleanedPreviousMessage = previousMessage.mes;
+        cleanedPreviousMessage = cleanedPreviousMessage.replace(/<\|eot_id\|>\s*$/s, '');
+        cleanedPreviousMessage = cleanedPreviousMessage.replace(/<\|end_of_text\|>\s*$/s, '');
+        cleanedPreviousMessage = cleanedPreviousMessage.replace(/<\|im_end\|>\s*$/s, '');
+        cleanedPreviousMessage = cleanedPreviousMessage.trimEnd();
+
+        // Combine messages
+        previousMessage.mes = cleanedPreviousMessage + ' ' + currentMessage.mes;
+
+        // Remove the current message
+        chat.splice(mesId, 1);
+        mesBlock.remove();
+
+        // Update the previous message display
+        const prevMesBlock = $(`#chat .mes[mesid="${mesId - 1}"]`);
+        prevMesBlock.find('.mes_text').html(messageFormatting(
+            previousMessage.mes,
+            previousMessage.name,
+            previousMessage.is_system,
+            previousMessage.is_user,
+            mesId - 1,
+            {},
+            false
+        ));
+
+        // Update message IDs
+        updateViewMessageIds();
+        await saveChatConditional();
+
+        await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
     });
 
     // Clean EOT tokens from prompts when last message is locked

@@ -6260,3 +6260,12 @@ body:not(.movingUI) .drawer-content.maximized {
 .mes_unlock:hover {
     color: var(--SmartThemeBodyColor);
 }
+
+.mes_combine {
+    color: var(--golden);
+    transition: color var(--animation-duration-2x) ease-in-out;
+}
+
+.mes_combine:hover {
+    color: var(--SmartThemeBodyColor);
+}
