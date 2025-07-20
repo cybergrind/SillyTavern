@@ -4271,6 +4271,38 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         }
     }
 
+    // Merge locked messages with their following messages
+    const mergedCoreChat = [];
+    for (let i = 0; i < coreChat.length; i++) {
+        const currentMessage = coreChat[i];
+
+        // If this message is locked and not a user message, and there's a next message
+        if (currentMessage.extra?.locked && !currentMessage.is_user && i < coreChat.length - 1) {
+            const nextMessage = coreChat[i + 1];
+
+            // Clean EOT tokens from the locked message
+            let cleanedLockedMessage = currentMessage.mes;
+            cleanedLockedMessage = cleanedLockedMessage.replace(/<\|eot_id\|>\s*$/s, '');
+            cleanedLockedMessage = cleanedLockedMessage.replace(/<\|end_of_text\|>\s*$/s, '');
+            cleanedLockedMessage = cleanedLockedMessage.replace(/<\|im_end\|>\s*$/s, '');
+            cleanedLockedMessage = cleanedLockedMessage.trimEnd();
+
+            // Skip this message and merge it with the next one
+            coreChat[i + 1] = {
+                ...nextMessage,
+                mes: cleanedLockedMessage + nextMessage.mes,
+                mergedFromLocked: true
+            };
+            console.log(`Merged locked message at index ${i} with next message`);
+        } else {
+            // Add the message normally
+            mergedCoreChat.push(currentMessage);
+        }
+    }
+
+    // Replace coreChat with the merged version
+    coreChat = mergedCoreChat;
+
     // Determine token limit
     let this_max_context = getMaxContextSize();
 
