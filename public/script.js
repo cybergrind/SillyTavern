@@ -2729,6 +2729,14 @@ export function addOneMessage(mes, { type = 'normal', insertAfter = null, scroll
         newMessage.find('.swipes-counter').text(formatSwipeCounter(swipeId, swipesNum));
     }
 
+    // Handle locked message state
+    if (mes.extra?.locked) {
+        newMessage.addClass('mes_locked');
+        newMessage.find('.mes_lock').hide();
+        newMessage.find('.mes_unlock').show();
+        newMessage.find('.mes_edit').addClass('disabled').attr('disabled', 'disabled');
+    }
+
     if (showSwipes) {
         $('#chat .mes').last().addClass('last_mes');
         $('#chat .mes').eq(-2).removeClass('last_mes');
@@ -3985,6 +3993,24 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     setGenerationProgress(0);
     generation_started = new Date();
 
+    // Check for locked messages that need continuation
+    if (type === 'normal' && chat.length > 0 && !automatic_trigger && !dryRun) {
+        // Find the last locked message
+        let lastLockedIndex = -1;
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (chat[i].extra?.locked && !chat[i].is_user) {
+                lastLockedIndex = i;
+                break;
+            }
+        }
+
+        // If last message is locked, switch to continue mode
+        if (lastLockedIndex === chat.length - 1) {
+            type = 'continue';
+            console.log('Last message is locked, switching to continue mode');
+        }
+    }
+
     // Prevent generation from shallow characters
     await unshallowCharacter(this_chid);
 
@@ -4993,7 +5019,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         }
     }
 
-    await eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data);
+    await eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, type);
 
     if (dryRun) {
         generatedPromptCache = '';
@@ -5500,6 +5526,7 @@ export function getBiasStrings(textareaText, type) {
 
     return { messageBias, promptBias, isUserPromptBias };
 }
+
 
 /**
  * @param {Object} chatItem Message history item.
@@ -11864,6 +11891,96 @@ jQuery(async function () {
 
     $(document).on('click', '.mes_edit_done', async function () {
         await messageEditDone($(this));
+    });
+
+    // Lock/unlock message handlers
+    $(document).on('click', '.mes_lock', async function () {
+        const mesBlock = $(this).closest('.mes');
+        const mesId = mesBlock.attr('mesid');
+
+        if (!chat[mesId]) return;
+
+        // Add locked flag to message metadata
+        if (!chat[mesId].extra) {
+            chat[mesId].extra = {};
+        }
+        chat[mesId].extra.locked = true;
+
+        // Update UI
+        mesBlock.addClass('mes_locked');
+        $(this).hide();
+        mesBlock.find('.mes_unlock').show();
+        mesBlock.find('.mes_edit').addClass('disabled').attr('disabled', 'disabled');
+
+        await saveChatConditional();
+    });
+
+    $(document).on('click', '.mes_unlock', async function () {
+        const mesBlock = $(this).closest('.mes');
+        const mesId = mesBlock.attr('mesid');
+
+        if (!chat[mesId]) return;
+
+        // Remove locked flag from message metadata
+        if (chat[mesId].extra) {
+            delete chat[mesId].extra.locked;
+        }
+
+        // Update UI
+        mesBlock.removeClass('mes_locked');
+        $(this).hide();
+        mesBlock.find('.mes_lock').show();
+        mesBlock.find('.mes_edit').removeClass('disabled').removeAttr('disabled');
+
+        await saveChatConditional();
+    });
+
+    // Clean EOT tokens from prompts when last message is locked
+    eventSource.on(event_types.GENERATE_AFTER_DATA, function(generateData, generationType) {
+        // Check if we have a locked message to clean
+        let shouldClean = false;
+        let messageToCheck = null;
+
+        if (generationType === 'swipe' && chat.length > 1) {
+            // For swipes, check the second-to-last message (the one before the message being regenerated)
+            messageToCheck = chat[chat.length - 2];
+            console.log(`Swipe generation: checking message at index ${chat.length - 2}`);
+        } else if (chat.length > 0) {
+            // For normal generation and continue, check the last message
+            messageToCheck = chat[chat.length - 1];
+        }
+
+        if (messageToCheck && messageToCheck.extra?.locked && !messageToCheck.is_user) {
+            shouldClean = true;
+            console.log(`Message is locked, cleaning EOT tokens from prompt (type: ${generationType})`);
+        }
+
+        if (shouldClean) {
+            // Clean the prompt based on API type
+            if (generateData.prompt && typeof generateData.prompt === 'string') {
+                // For text completion APIs (kobold, textgen, novel)
+                const lastEotIndex = generateData.prompt.lastIndexOf('<|eot_id|>');
+                if (lastEotIndex !== -1) {
+                    // Remove the <|eot_id|> token itself and everything after it
+                    generateData.prompt = generateData.prompt.substring(0, lastEotIndex);
+                    console.log('Cleaned prompt by removing <|eot_id|> and everything after');
+                }
+            } else if (Array.isArray(generateData.prompt)) {
+                // For OpenAI chat completion API
+                // Find the last assistant message and clean it
+                for (let i = generateData.prompt.length - 1; i >= 0; i--) {
+                    if (generateData.prompt[i].role === 'assistant' && generateData.prompt[i].content) {
+                        const lastEotIndex = generateData.prompt[i].content.lastIndexOf('<|eot_id|>');
+                        if (lastEotIndex !== -1) {
+                            // Remove the <|eot_id|> token itself and everything after it
+                            generateData.prompt[i].content = generateData.prompt[i].content.substring(0, lastEotIndex);
+                            console.log('Cleaned OpenAI prompt by removing <|eot_id|> and everything after');
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     });
 
     //Select chat
