@@ -4286,20 +4286,27 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         if (currentMessage.extra?.locked && !currentMessage.is_user && i < coreChat.length - 1) {
             const nextMessage = coreChat[i + 1];
 
-            // Clean EOT tokens from the locked message
-            let cleanedLockedMessage = currentMessage.mes;
-            cleanedLockedMessage = cleanedLockedMessage.replace(/<\|eot_id\|>\s*$/s, '');
-            cleanedLockedMessage = cleanedLockedMessage.replace(/<\|end_of_text\|>\s*$/s, '');
-            cleanedLockedMessage = cleanedLockedMessage.replace(/<\|im_end\|>\s*$/s, '');
-            cleanedLockedMessage = cleanedLockedMessage.trimEnd();
+            // Only merge if the next message is from the same character
+            if (nextMessage.name === currentMessage.name && !nextMessage.is_user) {
+                // Clean EOT tokens from the locked message
+                let cleanedLockedMessage = currentMessage.mes;
+                cleanedLockedMessage = cleanedLockedMessage.replace(/<\|eot_id\|>\s*$/s, '');
+                cleanedLockedMessage = cleanedLockedMessage.replace(/<\|end_of_text\|>\s*$/s, '');
+                cleanedLockedMessage = cleanedLockedMessage.replace(/<\|im_end\|>\s*$/s, '');
+                cleanedLockedMessage = cleanedLockedMessage.trimEnd();
 
-            // Skip this message and merge it with the next one
-            coreChat[i + 1] = {
-                ...nextMessage,
-                mes: cleanedLockedMessage + nextMessage.mes,
-                mergedFromLocked: true
-            };
-            console.log(`Merged locked message at index ${i} with next message`);
+                // Skip this message and merge it with the next one
+                coreChat[i + 1] = {
+                    ...nextMessage,
+                    mes: cleanedLockedMessage + nextMessage.mes,
+                    mergedFromLocked: true
+                };
+                console.log(`Merged locked message at index ${i} with next message from same character`);
+            } else {
+                // Different character or user message - keep the locked message as is
+                mergedCoreChat.push(currentMessage);
+                console.log(`Kept locked message at index ${i} - next message is from different character or is user message`);
+            }
         } else {
             // Add the message normally
             mergedCoreChat.push(currentMessage);
