@@ -6454,3 +6454,17 @@ body:not(.movingUI) .drawer-content.maximized {
         border-width: 2px;
     }
 }
+
+.mes_locked .mes_block {
+    border-left: 3px solid var(--golden);
+    padding-left: 10px;
+}
+
+.mes_locked .mes_text {
+    opacity: 0.85;
+}
+
+.mes_lock:hover,
+.mes_unlock {
+    color: var(--golden);
+}

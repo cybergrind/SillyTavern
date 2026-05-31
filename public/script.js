@@ -2536,6 +2536,21 @@ export function addOneMessage(mes, { type = undefined, insertAfter = null, scrol
     chatElement.find('.mes').removeClass('last_mes');
     chatElement.find('.mes').last().addClass('last_mes');
 
+    if (mes.extra?.locked) {
+        messageElement.addClass('mes_locked');
+        messageElement.find('.mes_lock').hide();
+        messageElement.find('.mes_unlock').show();
+
+        const prevMes = chat[messageId - 1];
+        if (prevMes && !mes.is_user && prevMes.name === mes.name && !prevMes.is_user) {
+            messageElement.find('.mes_combine').show();
+        } else {
+            messageElement.find('.mes_combine').hide();
+        }
+    } else {
+        messageElement.find('.mes_combine').hide();
+    }
+
     if (showSwipes) refreshSwipeButtons();
     // Don't scroll if not inserting last
     if (!insertAfter && !insertBefore && scroll) {
@@ -4336,6 +4351,15 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
     const lastMessage = chat[chat.length - 1];
 
+    // Seamless continuation of a locked tail.
+    // Chat-completion backends continue through their own prompt manager, so for them
+    // we reuse the framework's in-place continue path. Text-completion / instruct
+    // backends instead open the locked turn in the prompt via `seamlessContinue`
+    // (computed once coreChat is built) and emit the continuation as a NEW message.
+    if (main_api === 'openai' && [undefined, 'normal'].includes(type) && !automatic_trigger && !dryRun && !depth && chat.length && lastMessage && !lastMessage.is_user && lastMessage.extra?.locked) {
+        type = 'continue';
+    }
+
     let textareaText;
     if (type !== 'regenerate' && type !== 'swipe' && type !== 'quiet' && !isImpersonate && !dryRun && !depth) {
         is_send_press = true;
@@ -4439,10 +4463,27 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         coreChat.pop();
     }
 
+    // When the message that terminates the prompt is a locked assistant turn, the
+    // whole generation runs in continue MECHANICS (open the turn, continue-style
+    // injection placement, depth offsets and stopping strings) so the model extends
+    // it seamlessly - exactly like `continue`. It differs from a true continue only
+    // in the OUTPUT: the result is saved as a new message (send) or a swipe entry
+    // (swipe) instead of being appended in place, and `continue_mag` is never
+    // prepended (that stays gated on the real `isContinue`). Chat-completion backends
+    // continue through their own prompt manager (handled by the in-place reroute
+    // earlier), so this only fires off-OpenAI. The terminating message is stable
+    // across the map/merge below (merge never removes the last item), so it is safe
+    // to detect it here, before the depth offsets that depend on it.
+    const lockedTailMessage = coreChat[coreChat.length - 1];
+    const isLockedTailContinue = !isContinue && !isImpersonate && main_api !== 'openai'
+        && (type === 'swipe' || [undefined, 'normal'].includes(type))
+        && !!lockedTailMessage && !lockedTailMessage.is_user && !!lockedTailMessage.extra?.locked;
+    const seamlessContinue = isContinue || isLockedTailContinue;
+
     coreChat = await Promise.all(coreChat.map(async (/** @type {ChatMessage} */ chatItem, index) => {
         let message = chatItem.mes;
         let regexType = chatItem.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT;
-        let options = { isPrompt: true, depth: (coreChat.length - index - (isContinue ? 2 : 1)) };
+        let options = { isPrompt: true, depth: (coreChat.length - index - (seamlessContinue ? 2 : 1)) };
 
         let regexedMessage = getRegexedString(message, regexType, options);
         regexedMessage = await appendFileContent(chatItem, regexedMessage);
@@ -4469,10 +4510,28 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         };
     }));
 
+    // Merge consecutive same-character locked turns at the content level (before
+    // instruct/template formatting), so a multi-part locked passage is presented to
+    // the model as one continuous turn. A locked message followed by a user message
+    // or a different character is left untouched.
+    {
+        const mergedCoreChat = [];
+        for (let i = 0; i < coreChat.length; i++) {
+            const current = coreChat[i];
+            const next = coreChat[i + 1];
+            if (current.extra?.locked && !current.is_user && next && !next.is_user && next.name === current.name) {
+                next.mes = current.mes + next.mes;
+                continue;
+            }
+            mergedCoreChat.push(current);
+        }
+        coreChat = mergedCoreChat;
+    }
+
     const promptReasoning = new PromptReasoning();
     for (let i = coreChat.length - 1; i >= 0; i--) {
-        const depth = coreChat.length - i - (isContinue ? 2 : 1);
-        const isPrefix = isContinue && i === coreChat.length - 1;
+        const depth = coreChat.length - i - (seamlessContinue ? 2 : 1);
+        const isPrefix = seamlessContinue && i === coreChat.length - 1;
 
         // In group chats, only include reasoning from the currently generating character
         const isOtherGroupMember = selected_group && coreChat[i].name !== name2;
@@ -4683,7 +4742,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     // Inject all Depth prompts. Chat Completion does it separately
     let injectedIndices = [];
     if (main_api !== 'openai') {
-        injectedIndices = await doChatInject(coreChat, isContinue);
+        injectedIndices = await doChatInject(coreChat, seamlessContinue);
     }
 
     if (main_api !== 'openai' && power_user.sysprompt.enabled) {
@@ -4694,7 +4753,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         // Only inject the jb if there is one
         if (jailbreak) {
             // When continuing generation of previous output, last user message precedes the message to continue
-            if (isContinue) {
+            if (seamlessContinue) {
                 coreChat.splice(coreChat.length - 1, 0, { mes: jailbreak, is_user: true });
             } else {
                 // This operation will result in the injectedIndices indexes being off by one
@@ -4733,7 +4792,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         }
 
         // Do not suffix the message for continuation
-        if (i === 0 && isContinue) {
+        if (i === 0 && seamlessContinue) {
             // Pick something that's very unlikely to be in a message
             const FORMAT_TOKEN = '\u0000\ufffc\u0000\ufffd';
 
@@ -4804,7 +4863,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     }
 
     // Only add the chat in context if past the greeting message
-    if (isContinue && (chat2.length > 1 || main_api === 'openai')) {
+    if (seamlessContinue && (chat2.length > 1 || main_api === 'openai')) {
         cyclePrompt = chat2.shift();
         // Adjust indices to account for the shift
         injectedIndices = injectedIndices.map(shiftDownByOne).filter(x => x >= 0);
@@ -4913,7 +4972,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     let mesSend = [];
     console.debug('calling runGenerate');
 
-    if (isContinue) {
+    if (seamlessContinue) {
         // Coping mechanism for OAI spacing
         if (main_api === 'openai' && !cyclePrompt.endsWith(' ')) {
             cyclePrompt += oai_settings.continue_postfix;
@@ -4928,7 +4987,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     }
 
     let generatedPromptCache = cyclePrompt || '';
-    if (generatedPromptCache.length == 0 || type === 'continue') {
+    if (generatedPromptCache.length == 0 || type === 'continue' || seamlessContinue) {
         console.debug('generating prompt');
         chatString = '';
         arrMes = arrMes.reverse();
@@ -4941,7 +5000,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             // Cohee: This removes a newline from the end of the last message in the context
             // Last prompt line will add a newline if it's not a continuation
             // In instruct mode it only removes it if wrap is enabled and it's not a quiet generation
-            if (i === arrMes.length - 1 && type !== 'continue') {
+            if (i === arrMes.length - 1 && type !== 'continue' && !seamlessContinue) {
                 if (!isInstruct || (power_user.instruct.wrap && type !== 'quiet')) {
                     item = item.replace(/\n?$/, '');
                 }
@@ -5001,7 +5060,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
 
         // Get instruct mode line
-        if (isInstruct && !isContinue) {
+        if (isInstruct && !seamlessContinue) {
             const name = (quiet_prompt && !quietToLoud && !isImpersonate) ? (quietName ?? 'System') : (isImpersonate ? name1 : name2);
             const isQuiet = quiet_prompt && type == 'quiet';
             lastMesString += formatInstructModePrompt(name, isImpersonate, promptBias, name1, name2, isQuiet, quietToLoud);
@@ -5018,7 +5077,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
         // Add character's name
         // Force name append on continue (if not continuing on user message or first message)
-        const isContinuingOnFirstMessage = chat.length === 1 && isContinue;
+        const isContinuingOnFirstMessage = chat.length === 1 && seamlessContinue;
         if (!isInstruct && force_name2 && !isContinuingOnFirstMessage) {
             if (!lastMesString.endsWith('\n')) {
                 lastMesString += '\n';
@@ -5213,13 +5272,13 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             break;
         case 'textgenerationwebui': {
             const cfgValues = useCfgPrompt ? { guidanceScale: cfgGuidanceScale, negativePrompt: await getCombinedPrompt(true) } : null;
-            generate_data = await getTextGenGenerationData(finalPrompt, maxLength, isImpersonate, isContinue, cfgValues, type);
+            generate_data = await getTextGenGenerationData(finalPrompt, maxLength, isImpersonate, seamlessContinue, cfgValues, type);
             break;
         }
         case 'novel': {
             const cfgValues = useCfgPrompt ? { guidanceScale: cfgGuidanceScale } : null;
             const presetSettings = novelai_settings[novelai_setting_names[nai_settings.preset_settings_novel]];
-            generate_data = getNovelGenerationData(finalPrompt, presetSettings, maxLength, isImpersonate, isContinue, cfgValues, type);
+            generate_data = getNovelGenerationData(finalPrompt, presetSettings, maxLength, isImpersonate, seamlessContinue, cfgValues, type);
             break;
         }
         case 'openai': {
@@ -5338,7 +5397,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             let messageChunk = cleanUpMessage({
                 getMessage: getMessage,
                 isImpersonate: isImpersonate,
-                isContinue: isContinue,
+                isContinue: seamlessContinue,
                 displayIncompleteSentences: false,
             });
 
@@ -5436,7 +5495,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         messageChunk = cleanUpMessage({
             getMessage: getMessage,
             isImpersonate: isImpersonate,
-            isContinue: isContinue,
+            isContinue: seamlessContinue,
             displayIncompleteSentences: false,
         });
 
@@ -5457,7 +5516,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         getMessage = cleanUpMessage({
             getMessage: getMessage,
             isImpersonate: isImpersonate,
-            isContinue: isContinue,
+            isContinue: seamlessContinue,
             displayIncompleteSentences: displayIncomplete,
         });
 
@@ -6692,6 +6751,15 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         newMessage.extra.reasoning = reasoning;
         newMessage.extra.reasoning_duration = null;
         newMessage.extra.reasoning_signature = reasoningSignature;
+        // Inherit the locked state from the message being continued. A locked-tail
+        // continuation is emitted as a NEW assistant message (not appended in place),
+        // so the live tail would otherwise be unlocked and the next Generate would
+        // close the turn instead of continuing it - making the model repeat the open
+        // passage. Inheriting keeps the whole locked passage seamlessly continuable
+        // (and visibly locked). `lastMessage` is the message that preceded this push.
+        if (lastMessage && !lastMessage.is_user && lastMessage.name === newMessage.name && lastMessage.extra?.locked) {
+            newMessage.extra.locked = true;
+        }
         if (power_user.trim_spaces) {
             getMessage = getMessage.trim();
         }
@@ -11760,6 +11828,88 @@ jQuery(async function () {
                 console.error('Failed to copy: ', err);
             }
         }
+    });
+
+    $(document).on('click', '.mes_lock', async function () {
+        const mesBlock = $(this).closest('.mes');
+        const mesId = Number(mesBlock.attr('mesid'));
+        if (!chat[mesId]) {
+            return;
+        }
+        if (!chat[mesId].extra) {
+            chat[mesId].extra = {};
+        }
+        chat[mesId].extra.locked = true;
+        mesBlock.addClass('mes_locked');
+        mesBlock.find('.mes_lock').hide();
+        mesBlock.find('.mes_unlock').show();
+        const prevMes = chat[mesId - 1];
+        if (prevMes && !chat[mesId].is_user && prevMes.name === chat[mesId].name && !prevMes.is_user) {
+            mesBlock.find('.mes_combine').show();
+        } else {
+            mesBlock.find('.mes_combine').hide();
+        }
+        await saveChatConditional();
+    });
+
+    $(document).on('click', '.mes_unlock', async function () {
+        const mesBlock = $(this).closest('.mes');
+        const mesId = Number(mesBlock.attr('mesid'));
+        if (!chat[mesId]) {
+            return;
+        }
+        if (chat[mesId].extra) {
+            delete chat[mesId].extra.locked;
+        }
+        mesBlock.removeClass('mes_locked');
+        mesBlock.find('.mes_unlock').hide();
+        mesBlock.find('.mes_lock').show();
+        await saveChatConditional();
+    });
+
+    $(document).on('click', '.mes_combine', async function () {
+        const mesBlock = $(this).closest('.mes');
+        const mesId = Number(mesBlock.attr('mesid'));
+        if (!(mesId > 0)) {
+            return;
+        }
+        const current = chat[mesId];
+        const prev = chat[mesId - 1];
+        if (!current || !prev) {
+            return;
+        }
+        // Only combine into the previous message when it is from the same
+        // character (matching name) and neither message is a user message.
+        if (current.is_user || prev.is_user || prev.name !== current.name) {
+            return;
+        }
+        // Combine the CURRENTLY DISPLAYED swipe of this message into the previous
+        // one. `mes` can lag behind the active swipe (swipe nav defers the sync),
+        // so read the swipe array directly. Any other swipes of the current message
+        // are intentionally discarded along with it.
+        const currentText = (Array.isArray(current.swipes) && typeof current.swipe_id === 'number' && typeof current.swipes[current.swipe_id] === 'string')
+            ? current.swipes[current.swipe_id]
+            : current.mes;
+        // Physically flatten the two messages into one (plain content concat).
+        prev.mes = prev.mes + currentText;
+        // Keep the previous message's active swipe entry in sync so the combined
+        // text survives a later swipe/reload instead of reverting to the pre-combine swipe.
+        if (Array.isArray(prev.swipes) && typeof prev.swipe_id === 'number' && typeof prev.swipes[prev.swipe_id] === 'string') {
+            prev.swipes[prev.swipe_id] = prev.mes;
+        }
+        chat.splice(mesId, 1);
+        mesBlock.remove();
+        const prevBlock = chatElement.find(`.mes[mesid="${mesId - 1}"]`);
+        prevBlock.find('.mes_text').empty().append(messageFormatting(
+            prev.mes,
+            prev.name,
+            prev.is_system,
+            prev.is_user,
+            mesId - 1,
+        ));
+        updateViewMessageIds();
+        await saveChatConditional();
+        await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
     });
 
     //********************

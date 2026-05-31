@@ -723,6 +723,26 @@ export class PromptReasoning {
 
         // No reasoning provided or a legacy placeholder
         if (!reasoning || reasoning === PromptReasoning.REASONING_PLACEHOLDER) {
+            // A reasoning model expects its thought frame before every response. When
+            // continuing a message that has no captured reasoning (split/edited, or an
+            // empty thought block), emit the CONFIGURED frame with empty content so the
+            // model stays in-distribution instead of regenerating the frame mid-stream
+            // and looping. Template-agnostic: the markers come from the user's reasoning
+            // settings, not hardcoded; with no markers configured this is a no-op.
+            if (isPrefix && content) {
+                const framePrefix = substituteParams(power_user.reasoning.prefix || '');
+                const frameSuffix = substituteParams(power_user.reasoning.suffix || '');
+                if (framePrefix || frameSuffix) {
+                    const frameSeparator = substituteParams(power_user.reasoning.separator || '');
+                    const formattedFrame = `${framePrefix}${frameSuffix}${frameSeparator}`;
+                    this.prefixReasoning = '';
+                    this.prefixReasoningFormatted = formattedFrame;
+                    this.prefixLength = formattedFrame.length;
+                    this.prefixDuration = duration;
+                    this.prefixIncomplete = false;
+                    return `${formattedFrame}${content}`;
+                }
+            }
             return content;
         }
 
