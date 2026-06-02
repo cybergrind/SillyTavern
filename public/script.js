@@ -4520,7 +4520,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             const current = coreChat[i];
             const next = coreChat[i + 1];
             if (current.extra?.locked && !current.is_user && next && !next.is_user && next.name === current.name) {
-                next.mes = current.mes + next.mes;
+                next.mes = current.mes + ' ' + next.mes;
                 continue;
             }
             mergedCoreChat.push(current);
@@ -11890,8 +11890,9 @@ jQuery(async function () {
         const currentText = (Array.isArray(current.swipes) && typeof current.swipe_id === 'number' && typeof current.swipes[current.swipe_id] === 'string')
             ? current.swipes[current.swipe_id]
             : current.mes;
-        // Physically flatten the two messages into one (plain content concat).
-        prev.mes = prev.mes + currentText;
+        // Physically flatten the two messages into one (content concat with a
+        // single whitespace separator so the two passages don't run together).
+        prev.mes = prev.mes + ' ' + currentText;
         // Keep the previous message's active swipe entry in sync so the combined
         // text survives a later swipe/reload instead of reverting to the pre-combine swipe.
         if (Array.isArray(prev.swipes) && typeof prev.swipe_id === 'number' && typeof prev.swipes[prev.swipe_id] === 'string') {
